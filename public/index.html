@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LAN leltár</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><div><h1>LAN leltár</h1><p>Switchek, portok, VLAN-ok és MAC-címek</p></div><button id="add-switch">+ Switch</button></header>
+  <main><div id="message"></div><section id="inventory"></section></main>
+
+  <dialog id="form-dialog">
+    <form id="editor"><h2 id="dialog-title"></h2><div id="fields"></div>
+      <div class="actions"><button type="button" class="secondary" id="cancel">Mégse</button><button type="submit">Mentés</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>
