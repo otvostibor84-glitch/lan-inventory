@@ -50,6 +50,38 @@ db.exec(`
   );
 `);
 
+const schemaVersion = Number(db.prepare("PRAGMA user_version").get().user_version);
+if (schemaVersion < 1) {
+  db.exec(`
+    BEGIN;
+    ALTER TABLE devices RENAME TO devices_old;
+    CREATE TABLE devices (
+      id INTEGER PRIMARY KEY,
+      port_id INTEGER NOT NULL REFERENCES ports(id) ON DELETE CASCADE,
+      mac TEXT NOT NULL,
+      name TEXT,
+      ip_address TEXT,
+      vlan_id INTEGER NOT NULL DEFAULT 1,
+      notes TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(port_id, mac, vlan_id)
+    );
+    INSERT INTO devices (id,port_id,mac,name,ip_address,vlan_id,notes,updated_at)
+      SELECT id,port_id,mac,name,ip_address,COALESCE(vlan_id,1),notes,updated_at FROM devices_old;
+    DROP TABLE devices_old;
+    PRAGMA user_version = 1;
+    COMMIT;
+  `);
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS arp_entries (
+    mac TEXT PRIMARY KEY,
+    ip_address TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 app.use(express.json({ limit: "1mb" }));
 
 function safeEqual(a, b) {
@@ -79,6 +111,34 @@ app.use(express.static(path.join(__dirname, "public")));
 const clean = value => value === undefined || value === null ? null : String(value).trim() || null;
 const integer = value => value === "" || value === undefined || value === null ? null : Number(value);
 const mac = value => clean(value)?.toUpperCase().replace(/-/g, ":") || null;
+
+function parseFdb(text) {
+  const rows = [];
+  const seen = new Set();
+  const add = (port, address, vlan) => {
+    const row = { port: Number(port), mac: mac(address), vlan: Number(vlan) || 1 };
+    const key = `${row.port}|${row.mac}|${row.vlan}`;
+    if (row.port > 0 && row.mac && !seen.has(key)) { seen.add(key); rows.push(row); }
+  };
+  let match;
+  const dlink = /^\s*\d+\s+(\d+)\s+([0-9a-f:-]{17})\s+(\d+)\s+(?:Dynamic|Static)\b/gmi;
+  while ((match = dlink.exec(text))) add(match[1], match[2], match[3]);
+  const threeCom = /([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+(\d+)\s+Config\s+(?:dynamic|static)\s+(\d+)\s+(?:AGING|STATIC)/gi;
+  while ((match = threeCom.exec(text))) add(match[3], match[1], match[2]);
+  return rows;
+}
+
+function parseArp(text) {
+  const rows = [];
+  const arp = /^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-f-]{17})\s+(?:dynamic|static)\b/gmi;
+  let match;
+  while ((match = arp.exec(text))) {
+    const address = mac(match[2]);
+    const firstByte = Number.parseInt(address.slice(0, 2), 16);
+    if (address !== "FF:FF:FF:FF:FF:FF" && (firstByte & 1) === 0) rows.push({ ip: match[1], mac: address });
+  }
+  return rows;
+}
 
 app.get("/api/inventory", (req, res) => {
   const switches = db.prepare("SELECT * FROM switches ORDER BY name COLLATE NOCASE").all();
@@ -164,6 +224,49 @@ app.put("/api/devices/:id", (req, res, next) => {
 app.delete("/api/devices/:id", (req, res) => {
   db.prepare("DELETE FROM devices WHERE id=?").run(req.params.id);
   res.json({ ok: true });
+});
+
+app.post("/api/import/fdb", (req, res, next) => {
+  try {
+    const switchId = integer(req.body.switch_id);
+    const rows = parseFdb(String(req.body.text || ""));
+    if (!switchId || !rows.length) return res.status(400).json({ error: "Nem találtam importálható MAC-tábla sorokat." });
+    const findPort = db.prepare("SELECT id FROM ports WHERE switch_id=? AND lower(name) IN (?,?,?) LIMIT 1");
+    const addPort = db.prepare("INSERT INTO ports (switch_id,name,media,mode) VALUES (?,?,'rez','ismeretlen')");
+    const findIp = db.prepare("SELECT ip_address FROM arp_entries WHERE mac=?");
+    const addDevice = db.prepare(`INSERT INTO devices (port_id,mac,ip_address,vlan_id)
+      VALUES (?,?,?,?) ON CONFLICT(port_id,mac,vlan_id) DO UPDATE SET
+      ip_address=COALESCE(excluded.ip_address,devices.ip_address),updated_at=CURRENT_TIMESTAMP`);
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const p = String(row.port);
+        let portRow = findPort.get(switchId, p, `${p}. port`, `port ${p}`);
+        if (!portRow) portRow = { id: Number(addPort.run(switchId, `${p}. port`).lastInsertRowid) };
+        const arpRow = findIp.get(row.mac);
+        addDevice.run(portRow.id, row.mac, arpRow?.ip_address || null, row.vlan);
+      }
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    res.json({ ok: true, imported: rows.length });
+  } catch (e) { next(e); }
+});
+
+app.post("/api/import/arp", (req, res, next) => {
+  try {
+    const rows = parseArp(String(req.body.text || ""));
+    if (!rows.length) return res.status(400).json({ error: "Nem találtam importálható ARP-bejegyzéseket." });
+    const upsert = db.prepare(`INSERT INTO arp_entries (mac,ip_address) VALUES (?,?)
+      ON CONFLICT(mac) DO UPDATE SET ip_address=excluded.ip_address,updated_at=CURRENT_TIMESTAMP`);
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) upsert.run(row.mac, row.ip);
+      db.exec(`UPDATE devices SET ip_address=(SELECT ip_address FROM arp_entries WHERE arp_entries.mac=devices.mac),updated_at=CURRENT_TIMESTAMP
+        WHERE EXISTS (SELECT 1 FROM arp_entries WHERE arp_entries.mac=devices.mac)`);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    res.json({ ok: true, imported: rows.length });
+  } catch (e) { next(e); }
 });
 
 app.use((err, req, res, next) => {

@@ -2,6 +2,8 @@
 
 Egyszerű belső webalkalmazás switchek, portok, VLAN-ok és MAC-címek nyilvántartására.
 
+A webes felület D-Link és 3Com MAC-táblák tömeges beillesztését, valamint Windows `arp -a` kimenet importját is támogatja. Az ARP-import a MAC-címekhez automatikusan hozzárendeli az ismert IP-címeket.
+
 ## Követelmények
 
 - Node.js 22.5 vagy újabb
