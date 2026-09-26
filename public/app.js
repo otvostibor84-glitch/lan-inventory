@@ -34,12 +34,12 @@ function deviceList(devices) {
 
 function render() {
   if (!data.length) { inventory.innerHTML='<div class="empty">Még nincs switch. Kezdd a fő switch felvitelével.</div>'; return; }
-  inventory.innerHTML=data.map(sw=>`<article class="switch-card">
-    <div class="switch-head"><div><h2>${esc(sw.name)}</h2><div class="muted">${esc(sw.management_ip||"Nincs IP")} · ${esc(sw.model||"Ismeretlen típus")} · ${esc(sw.location||"Nincs helyszín")}</div></div>
-      <div class="toolbar"><button class="tiny secondary" onclick="importFdb(${sw.id})">MAC import</button><button class="tiny" onclick="editSwitch(${sw.id})">Szerkesztés</button><button class="tiny" onclick="addPort(${sw.id})">+ Port</button><button class="tiny danger" onclick="removeItem('switches',${sw.id},'A switch minden portjával és MAC-címével együtt törlődik. Biztos?')">Törlés</button></div></div>
+  inventory.innerHTML=data.map(sw=>`<article class="switch-card"><details class="switch-details">
+    <summary class="switch-head"><div><h2>${esc(sw.name)}</h2><div class="muted">${esc(sw.management_ip||"Nincs IP")} · ${esc(sw.model||"Ismeretlen típus")} · ${esc(sw.location||"Nincs helyszín")}</div></div><span class="switch-toggle">Portok</span></summary>
+    <div class="switch-actions toolbar"><button class="tiny secondary" onclick="importFdb(${sw.id})">MAC import</button><button class="tiny" onclick="editSwitch(${sw.id})">Szerkesztés</button><button class="tiny" onclick="addPort(${sw.id})">+ Port</button><button class="tiny danger" onclick="removeItem('switches',${sw.id},'A switch minden portjával és MAC-címével együtt törlődik. Biztos?')">Törlés</button></div>
     <div class="ports"><table><thead><tr><th>Port</th><th>Közeg / mód</th><th>VLAN</th><th>Kapcsolat</th><th>MAC-címek</th><th>Művelet</th></tr></thead><tbody>
       ${sw.ports.length?sw.ports.map(p=>`<tr><td><strong>${esc(p.name)}</strong><br><span class="muted">${esc(p.label||"")}</span></td><td>${esc(p.media)}<br><span class="badge">${esc(p.mode)}</span></td><td>${esc(p.vlan_id||"—")} ${esc(p.vlan_name||"")}</td><td>${esc(p.remote_switch||"—")} ${esc(p.remote_port||"")}</td><td>${deviceList(p.devices)}</td><td><div class="toolbar"><button class="tiny" onclick="addDevice(${p.id})">+ MAC</button><button class="tiny secondary" onclick="editPort(${p.id})">✎</button><button class="tiny danger" onclick="removeItem('ports',${p.id},'Törlöd a portot és a hozzá tartozó MAC-címeket?')">×</button></div></td></tr>`).join(""):'<tr><td colspan="6" class="muted">Nincs rögzített port.</td></tr>'}
-    </tbody></table></div></article>`).join("");
+    </tbody></table></div></details></article>`).join("");
 }
 
 function openEditor(title, html, endpoint, method, extra={}) {
