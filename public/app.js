@@ -35,18 +35,31 @@ function deviceList(devices) {
 }
 
 function renderSearch() {
-  const query = macSearch.value.toUpperCase().replace(/[^0-9A-F]/g, "");
+  const query = macSearch.value.trim();
   if (!query) { searchResults.innerHTML = ""; return; }
+  const macQuery = query.toUpperCase().replace(/[^0-9A-F]/g, "");
+  const ipQuery = query.replace(/\s/g, "");
+  const looksLikeIp = query.includes(".");
   const matches = [];
+  for (const sw of data) {
+    const switchMac = String(sw.base_mac || "").replace(/[^0-9A-F]/gi, "").toUpperCase();
+    const macMatch = !looksLikeIp && macQuery && switchMac.includes(macQuery);
+    const ipMatch = String(sw.management_ip || "").includes(ipQuery);
+    if (macMatch || ipMatch) matches.push({ sw, port: null, device: null });
+  }
   for (const sw of data) for (const port of sw.ports) for (const device of port.devices) {
     const normalized = device.mac.replace(/[^0-9A-F]/gi, "").toUpperCase();
-    if (normalized.includes(query)) matches.push({ sw, port, device });
+    const macMatch = !looksLikeIp && macQuery && normalized.includes(macQuery);
+    const ipMatch = String(device.ip_address || "").includes(ipQuery);
+    if (macMatch || ipMatch) matches.push({ sw, port, device });
   }
   if (!matches.length) {
     searchResults.innerHTML = '<div class="search-empty">Nincs találat.</div>';
     return;
   }
-  searchResults.innerHTML = `<div class="search-count">${matches.length} találat</div><div class="search-table"><table><thead><tr><th>MAC-cím</th><th>IP-cím</th><th>Eszköz</th><th>Switch</th><th>Port</th><th>VLAN</th><th></th></tr></thead><tbody>${matches.map(({sw,port,device})=>`<tr><td><strong>${esc(device.mac)}</strong></td><td>${esc(device.ip_address||"—")}</td><td>${esc(device.name||"—")}</td><td>${esc(sw.name)}</td><td>${esc(port.name)} ${esc(port.label||"")}</td><td>${esc(device.vlan_id||port.vlan_id||"—")}</td><td><button class="tiny secondary" onclick="editDevice(${device.id})">Szerkesztés</button></td></tr>`).join("")}</tbody></table></div>`;
+  searchResults.innerHTML = `<div class="search-count">${matches.length} találat</div><div class="search-table"><table><thead><tr><th>MAC-cím</th><th>IP-cím</th><th>Eszköz</th><th>Switch</th><th>Port</th><th>VLAN</th><th></th></tr></thead><tbody>${matches.map(({sw,port,device})=>device
+    ? `<tr><td><strong>${esc(device.mac)}</strong></td><td>${esc(device.ip_address||"—")}</td><td>${esc(device.name||"—")}</td><td>${esc(sw.name)}</td><td>${esc(port.name)} ${esc(port.label||"")}</td><td>${esc(device.vlan_id||port.vlan_id||"—")}</td><td><button class="tiny secondary" onclick="editDevice(${device.id})">Szerkesztés</button></td></tr>`
+    : `<tr><td><strong>${esc(sw.base_mac||"—")}</strong></td><td>${esc(sw.management_ip||"—")}</td><td>Switch (menedzsment)</td><td>${esc(sw.name)}</td><td>—</td><td>—</td><td><button class="tiny secondary" onclick="editSwitch(${sw.id})">Szerkesztés</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function render() {
