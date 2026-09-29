@@ -8,7 +8,15 @@
 </head>
 <body>
   <header><div><h1>LAN leltár</h1><p>Switchek, portok, VLAN-ok és MAC-címek</p></div><div class="toolbar"><button id="import-arp">ARP import</button><button id="add-switch">+ Switch</button></div></header>
-  <main><div id="message"></div><section id="inventory"></section></main>
+  <main>
+    <div id="message"></div>
+    <section class="search-card">
+      <label for="mac-search">MAC-cím keresése</label>
+      <input id="mac-search" type="search" placeholder="Például E4:38:83 vagy D9-37-F8" autocomplete="off">
+      <div id="search-results"></div>
+    </section>
+    <section id="inventory"></section>
+  </main>
 
   <dialog id="form-dialog">
     <form id="editor"><h2 id="dialog-title"></h2><div id="fields"></div>

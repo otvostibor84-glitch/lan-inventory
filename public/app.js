@@ -3,6 +3,8 @@ const dialog = document.querySelector("#form-dialog");
 const form = document.querySelector("#editor");
 const fields = document.querySelector("#fields");
 const message = document.querySelector("#message");
+const macSearch = document.querySelector("#mac-search");
+const searchResults = document.querySelector("#search-results");
 let data = [];
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -32,6 +34,21 @@ function deviceList(devices) {
   return `<details class="mac-list"><summary>${devices.length} MAC-cím</summary><div class="mac-list-body">${devices.map(deviceLine).join("")}</div></details>`;
 }
 
+function renderSearch() {
+  const query = macSearch.value.toUpperCase().replace(/[^0-9A-F]/g, "");
+  if (!query) { searchResults.innerHTML = ""; return; }
+  const matches = [];
+  for (const sw of data) for (const port of sw.ports) for (const device of port.devices) {
+    const normalized = device.mac.replace(/[^0-9A-F]/gi, "").toUpperCase();
+    if (normalized.includes(query)) matches.push({ sw, port, device });
+  }
+  if (!matches.length) {
+    searchResults.innerHTML = '<div class="search-empty">Nincs találat.</div>';
+    return;
+  }
+  searchResults.innerHTML = `<div class="search-count">${matches.length} találat</div><div class="search-table"><table><thead><tr><th>MAC-cím</th><th>IP-cím</th><th>Eszköz</th><th>Switch</th><th>Port</th><th>VLAN</th><th></th></tr></thead><tbody>${matches.map(({sw,port,device})=>`<tr><td><strong>${esc(device.mac)}</strong></td><td>${esc(device.ip_address||"—")}</td><td>${esc(device.name||"—")}</td><td>${esc(sw.name)}</td><td>${esc(port.name)} ${esc(port.label||"")}</td><td>${esc(device.vlan_id||port.vlan_id||"—")}</td><td><button class="tiny secondary" onclick="editDevice(${device.id})">Szerkesztés</button></td></tr>`).join("")}</tbody></table></div>`;
+}
+
 function render() {
   if (!data.length) { inventory.innerHTML='<div class="empty">Még nincs switch. Kezdd a fő switch felvitelével.</div>'; return; }
   inventory.innerHTML=data.map(sw=>`<article class="switch-card"><details class="switch-details">
@@ -40,6 +57,7 @@ function render() {
     <div class="ports"><table><thead><tr><th>Port</th><th>Közeg / mód</th><th>VLAN</th><th>Kapcsolat</th><th>MAC-címek</th><th>Művelet</th></tr></thead><tbody>
       ${sw.ports.length?sw.ports.map(p=>`<tr><td><strong>${esc(p.name)}</strong><br><span class="muted">${esc(p.label||"")}</span></td><td>${esc(p.media)}<br><span class="badge">${esc(p.mode)}</span></td><td>${esc(p.vlan_id||"—")} ${esc(p.vlan_name||"")}</td><td>${esc(p.remote_switch||"—")} ${esc(p.remote_port||"")}</td><td>${deviceList(p.devices)}</td><td><div class="toolbar"><button class="tiny" onclick="addDevice(${p.id})">+ MAC</button><button class="tiny secondary" onclick="editPort(${p.id})">✎</button><button class="tiny danger" onclick="removeItem('ports',${p.id},'Törlöd a portot és a hozzá tartozó MAC-címeket?')">×</button></div></td></tr>`).join(""):'<tr><td colspan="6" class="muted">Nincs rögzített port.</td></tr>'}
     </tbody></table></div></details></article>`).join("");
+  renderSearch();
 }
 
 function openEditor(title, html, endpoint, method, extra={}) {
@@ -66,5 +84,6 @@ document.querySelector("#import-arp").onclick=()=>openEditor("ARP-tábla import�
 
 window.removeItem=async(type,id,text)=>{if(!confirm(text))return;try{await api(`/api/${type}/${id}`,{method:"DELETE"});await load()}catch(err){showError(err.message)}};
 document.querySelector("#cancel").onclick=()=>dialog.close();
+macSearch.addEventListener("input", renderSearch);
 function showError(text){message.textContent=text;message.style.display="block";setTimeout(()=>message.style.display="none",5000)}
 load().catch(e=>showError(e.message));
