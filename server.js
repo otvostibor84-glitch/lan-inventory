@@ -2,12 +2,14 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const net = require("net");
+const snmp = require("net-snmp");
 const { DatabaseSync } = require("node:sqlite");
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const host = process.env.BIND_ADDRESS || "127.0.0.1";
-const dataDir = path.join(__dirname, "data");
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, "data");
 fs.mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(path.join(dataDir, "inventory.sqlite"));
 db.exec(`
@@ -74,6 +76,20 @@ if (schemaVersion < 1) {
   `);
 }
 
+if (schemaVersion < 2) {
+  db.exec(`
+    BEGIN;
+    ALTER TABLE ports ADD COLUMN snmp_if_index INTEGER;
+    ALTER TABLE ports ADD COLUMN link_state TEXT;
+    ALTER TABLE ports ADD COLUMN link_speed_mbps INTEGER;
+    ALTER TABLE ports ADD COLUMN snmp_updated_at TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_switch_snmp_if
+      ON ports(switch_id, snmp_if_index) WHERE snmp_if_index IS NOT NULL;
+    PRAGMA user_version = 2;
+    COMMIT;
+  `);
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS arp_entries (
     mac TEXT PRIMARY KEY,
@@ -111,6 +127,122 @@ app.use(express.static(path.join(__dirname, "public")));
 const clean = value => value === undefined || value === null ? null : String(value).trim() || null;
 const integer = value => value === "" || value === undefined || value === null ? null : Number(value);
 const mac = value => clean(value)?.toUpperCase().replace(/-/g, ":") || null;
+
+function privateIpv4(value) {
+  if (net.isIP(value) !== 4) return false;
+  const [a, b] = value.split(".").map(Number);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+function snmpOptions() {
+  const community = process.env.SNMP_COMMUNITY;
+  if (!community) throw new Error("Az SNMP nincs beállítva a szerveren (SNMP_COMMUNITY).");
+  return {
+    community,
+    version: String(process.env.SNMP_VERSION || "2c").toLowerCase() === "1" ? snmp.Version1 : snmp.Version2c,
+    timeout: Math.min(Math.max(Number(process.env.SNMP_TIMEOUT || 5000), 1000), 15000),
+    retries: Math.min(Math.max(Number(process.env.SNMP_RETRIES || 1), 0), 3)
+  };
+}
+
+function snmpSession(address) {
+  if (!privateIpv4(address)) throw new Error("SNMP csak privát IPv4-címen használható.");
+  const options = snmpOptions();
+  return snmp.createSession(address, options.community, options);
+}
+
+const snmpValue = value => Buffer.isBuffer(value) ? value.toString() : value;
+const snmpMac = value => Buffer.isBuffer(value) && value.length >= 6
+  ? [...value.subarray(0, 6)].map(x => x.toString(16).padStart(2, "0")).join(":").toUpperCase()
+  : null;
+
+function snmpGet(session, oids) {
+  return new Promise((resolve, reject) => session.get(oids, (error, varbinds) => {
+    if (error) return reject(error);
+    const problem = varbinds.find(snmp.isVarbindError);
+    if (problem) return reject(new Error(snmp.varbindError(problem)));
+    resolve(varbinds.map(v => snmpValue(v.value)));
+  }));
+}
+
+function snmpTable(session, oid) {
+  return new Promise((resolve, reject) => session.table(oid, 20, (error, table) => error ? reject(error) : resolve(table)));
+}
+
+function snmpWalk(session, oid, limit = 10000) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    session.subtree(oid, 20, varbinds => {
+      for (const row of varbinds) {
+        if (snmp.isVarbindError(row)) continue;
+        if (rows.length >= limit) return true;
+        rows.push(row);
+      }
+      return false;
+    }, error => error ? reject(error) : resolve(rows));
+  });
+}
+
+async function readSnmpInventory(sw) {
+  const session = snmpSession(sw.management_ip);
+  try {
+    const [system, ifTable, bridgeRows] = await Promise.all([
+      snmpGet(session, ["1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", "1.3.6.1.2.1.1.3.0", "1.3.6.1.2.1.1.5.0"]),
+      snmpTable(session, "1.3.6.1.2.1.2.2"),
+      snmpWalk(session, "1.3.6.1.2.1.17.1.4.1.2")
+    ]);
+    const bridgeToIf = new Map(bridgeRows.map(row => [Number(row.oid.split(".").at(-1)), Number(row.value)]));
+    const ifToBridge = new Map([...bridgeToIf].map(([bridgePort, ifIndex]) => [ifIndex, bridgePort]));
+    const ports = Object.entries(ifTable).map(([index, row]) => {
+      const ifIndex = Number(index);
+      const portNumber = ifToBridge.get(ifIndex);
+      return {
+        port: portNumber || ifIndex,
+        if_index: ifIndex,
+        name: String(snmpValue(row["2"]) || `${portNumber || ifIndex}. port`),
+        admin_state: Number(row["7"]) === 1 ? "up" : "down",
+        link_state: Number(row["8"]) === 1 ? "up" : "down",
+        speed_mbps: Math.round(Number(row["5"] || 0) / 1000000),
+        interface_mac: snmpMac(row["6"])
+      };
+    }).filter(row => ifToBridge.size ? ifToBridge.has(row.if_index) : Number(ifTable[row.if_index]?.["3"]) === 6)
+      .sort((a, b) => a.port - b.port);
+
+    const [classicFdb, qFdb, vlanFdb] = await Promise.all([
+      snmpWalk(session, "1.3.6.1.2.1.17.4.3.1.2").catch(() => []),
+      snmpWalk(session, "1.3.6.1.2.1.17.7.1.2.2.1.2").catch(() => []),
+      snmpWalk(session, "1.3.6.1.2.1.17.7.1.4.2.1.3").catch(() => [])
+    ]);
+    const fdbToVlan = new Map(vlanFdb.map(row => [Number(row.value), Number(row.oid.split(".").at(-1))]));
+    const learned = [];
+    const addMac = (bridgePort, address, vlan) => {
+      const first = Number.parseInt(address.slice(0, 2), 16);
+      const port = ports.find(p => p.if_index === bridgeToIf.get(Number(bridgePort)));
+      if (port && (first & 1) === 0) learned.push({ port: port.port, if_index: port.if_index, mac: address, vlan: vlan || 1 });
+    };
+    if (qFdb.length) {
+      for (const row of qFdb) {
+        const suffix = row.oid.slice("1.3.6.1.2.1.17.7.1.2.2.1.2.".length).split(".").map(Number);
+        if (suffix.length < 7) continue;
+        addMac(Number(row.value), suffix.slice(1, 7).map(x => x.toString(16).padStart(2, "0")).join(":").toUpperCase(), fdbToVlan.get(suffix[0]) || 1);
+      }
+    } else {
+      for (const row of classicFdb) {
+        const bytes = row.oid.split(".").slice(-6).map(Number);
+        addMac(Number(row.value), bytes.map(x => x.toString(16).padStart(2, "0")).join(":").toUpperCase(), 1);
+      }
+    }
+    const unique = [...new Map(learned.map(row => [`${row.port}|${row.mac}|${row.vlan}`, row])).values()];
+    return {
+      system: { description: String(system[0] || ""), object_id: String(system[1] || ""), uptime_ticks: Number(system[2] || 0), name: String(system[3] || "") },
+      ports,
+      macs: unique,
+      collected_at: new Date().toISOString()
+    };
+  } finally {
+    session.close();
+  }
+}
 
 function parseFdb(text) {
   const rows = [];
@@ -175,6 +307,68 @@ app.put("/api/switches/:id", (req, res, next) => {
 app.delete("/api/switches/:id", (req, res) => {
   db.prepare("DELETE FROM switches WHERE id=?").run(req.params.id);
   res.json({ ok: true });
+});
+
+function snmpFailure(res, error) {
+  const text = String(error?.message || "");
+  const message = text.includes("SNMP_COMMUNITY") || text.includes("privát IPv4")
+    ? text
+    : text.toLowerCase().includes("timeout") || text.toLowerCase().includes("timed out")
+      ? "Az SNMP-lekérdezés időtúllépéssel leállt. Ellenőrizd az SNMP állapotát, communityt és a UDP 161 elérését."
+      : "Az SNMP-lekérdezés nem sikerült.";
+  res.status(502).json({ error: message });
+}
+
+app.get("/api/switches/:id/snmp", async (req, res) => {
+  try {
+    const sw = db.prepare("SELECT * FROM switches WHERE id=?").get(req.params.id);
+    if (!sw) return res.status(404).json({ error: "A switch nem található." });
+    if (!sw.management_ip) return res.status(400).json({ error: "A switchnek nincs menedzsment IP-címe." });
+    res.json(await readSnmpInventory(sw));
+  } catch (error) { snmpFailure(res, error); }
+});
+
+app.post("/api/switches/:id/snmp/import", async (req, res) => {
+  try {
+    const switchId = integer(req.params.id);
+    const sw = db.prepare("SELECT * FROM switches WHERE id=?").get(switchId);
+    if (!sw) return res.status(404).json({ error: "A switch nem található." });
+    if (!sw.management_ip) return res.status(400).json({ error: "A switchnek nincs menedzsment IP-címe." });
+    const snapshot = await readSnmpInventory(sw);
+    const findPort = db.prepare(`SELECT id FROM ports WHERE switch_id=? AND
+      (snmp_if_index=? OR lower(name) IN (?,?,?))
+      ORDER BY snmp_if_index IS NOT NULL DESC LIMIT 1`);
+    const addPort = db.prepare(`INSERT INTO ports
+      (switch_id,name,media,mode,snmp_if_index,link_state,link_speed_mbps,snmp_updated_at)
+      VALUES (?,?,'rez','ismeretlen',?,?,?,CURRENT_TIMESTAMP)`);
+    const updatePort = db.prepare(`UPDATE ports SET snmp_if_index=?,link_state=?,link_speed_mbps=?,snmp_updated_at=CURRENT_TIMESTAMP WHERE id=?`);
+    const findIp = db.prepare("SELECT ip_address FROM arp_entries WHERE mac=?");
+    const addDevice = db.prepare(`INSERT INTO devices (port_id,mac,ip_address,vlan_id)
+      VALUES (?,?,?,?) ON CONFLICT(port_id,mac,vlan_id) DO UPDATE SET
+      ip_address=COALESCE(excluded.ip_address,devices.ip_address),updated_at=CURRENT_TIMESTAMP`);
+    const importedPorts = new Map();
+    db.exec("BEGIN");
+    try {
+      for (const row of snapshot.ports) {
+        const number = String(row.port);
+        let portRow = findPort.get(switchId, row.if_index, number, `${number}. port`, `port ${number}`);
+        if (!portRow) {
+          portRow = { id: Number(addPort.run(switchId, `${number}. port`, row.if_index, row.link_state, row.speed_mbps).lastInsertRowid) };
+        } else {
+          updatePort.run(row.if_index, row.link_state, row.speed_mbps, portRow.id);
+        }
+        importedPorts.set(row.if_index, portRow.id);
+      }
+      for (const row of snapshot.macs) {
+        const portId = importedPorts.get(row.if_index);
+        if (!portId) continue;
+        const arpRow = findIp.get(row.mac);
+        addDevice.run(portId, row.mac, arpRow?.ip_address || null, row.vlan || 1);
+      }
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    res.json({ ok: true, ports: snapshot.ports.length, macs: snapshot.macs.length, collected_at: snapshot.collected_at });
+  } catch (error) { snmpFailure(res, error); }
 });
 
 app.post("/api/ports", (req, res, next) => {

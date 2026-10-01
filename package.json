@@ -12,6 +12,7 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "net-snmp": "^3.29.1"
   }
 }

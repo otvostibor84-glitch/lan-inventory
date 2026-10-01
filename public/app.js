@@ -66,19 +66,36 @@ function render() {
   if (!data.length) { inventory.innerHTML='<div class="empty">Még nincs switch. Kezdd a fő switch felvitelével.</div>'; return; }
   inventory.innerHTML=data.map(sw=>`<article class="switch-card"><details class="switch-details">
     <summary class="switch-head"><div><h2>${esc(sw.name)}</h2><div class="muted">${esc(sw.management_ip||"Nincs IP")} · ${esc(sw.model||"Ismeretlen típus")} · ${esc(sw.location||"Nincs helyszín")}</div></div><span class="switch-toggle">Portok</span></summary>
-    <div class="switch-actions toolbar"><button class="tiny secondary" onclick="importFdb(${sw.id})">MAC import</button><button class="tiny" onclick="editSwitch(${sw.id})">Szerkesztés</button><button class="tiny" onclick="addPort(${sw.id})">+ Port</button><button class="tiny danger" onclick="removeItem('switches',${sw.id},'A switch minden portjával és MAC-címével együtt törlődik. Biztos?')">Törlés</button></div>
+    <div class="switch-actions toolbar">${sw.management_ip?`<button class="tiny secondary" onclick="snmpPreview(${sw.id})">SNMP</button>`:""}<button class="tiny secondary" onclick="importFdb(${sw.id})">MAC import</button><button class="tiny" onclick="editSwitch(${sw.id})">Szerkesztés</button><button class="tiny" onclick="addPort(${sw.id})">+ Port</button><button class="tiny danger" onclick="removeItem('switches',${sw.id},'A switch minden portjával és MAC-címével együtt törlődik. Biztos?')">Törlés</button></div>
     <div class="ports"><table><thead><tr><th>Port</th><th>Közeg / mód</th><th>VLAN</th><th>Kapcsolat</th><th>MAC-címek</th><th>Művelet</th></tr></thead><tbody>
-      ${sw.ports.length?sw.ports.map(p=>`<tr><td><strong>${esc(p.name)}</strong><br><span class="muted">${esc(p.label||"")}</span></td><td>${esc(p.media)}<br><span class="badge">${esc(p.mode)}</span></td><td>${esc(p.vlan_id||"—")} ${esc(p.vlan_name||"")}</td><td>${esc(p.remote_switch||"—")} ${esc(p.remote_port||"")}</td><td>${deviceList(p.devices)}</td><td><div class="toolbar"><button class="tiny" onclick="addDevice(${p.id})">+ MAC</button><button class="tiny secondary" onclick="editPort(${p.id})">✎</button><button class="tiny danger" onclick="removeItem('ports',${p.id},'Törlöd a portot és a hozzá tartozó MAC-címeket?')">×</button></div></td></tr>`).join(""):'<tr><td colspan="6" class="muted">Nincs rögzített port.</td></tr>'}
+      ${sw.ports.length?sw.ports.map(p=>`<tr><td><strong>${esc(p.name)}</strong><br><span class="muted">${esc(p.label||"")}</span></td><td>${esc(p.media)}<br><span class="badge">${esc(p.mode)}</span>${p.link_state?`<br><span class="link-state ${esc(p.link_state)}">${p.link_state==="up"?"● aktív":"○ inaktív"}${p.link_speed_mbps?` · ${esc(p.link_speed_mbps)} Mbit/s`:""}</span>`:""}</td><td>${esc(p.vlan_id||"—")} ${esc(p.vlan_name||"")}</td><td>${esc(p.remote_switch||"—")} ${esc(p.remote_port||"")}</td><td>${deviceList(p.devices)}</td><td><div class="toolbar"><button class="tiny" onclick="addDevice(${p.id})">+ MAC</button><button class="tiny secondary" onclick="editPort(${p.id})">✎</button><button class="tiny danger" onclick="removeItem('ports',${p.id},'Törlöd a portot és a hozzá tartozó MAC-címeket?')">×</button></div></td></tr>`).join(""):'<tr><td colspan="6" class="muted">Nincs rögzített port.</td></tr>'}
     </tbody></table></div></details></article>`).join("");
   renderSearch();
 }
 
-function openEditor(title, html, endpoint, method, extra={}) {
+function openEditor(title, html, endpoint, method, extra={}, options={}) {
   document.querySelector("#dialog-title").textContent=title;
+  dialog.classList.toggle("wide", Boolean(options.wide));
+  form.querySelector('button[type="submit"]').textContent=options.submitLabel||"Mentés";
   fields.innerHTML=`<div class="grid">${html}</div>`;
   form.onsubmit=async e=>{e.preventDefault(); try { const body=Object.fromEntries(new FormData(form)); await api(endpoint,{method,body:JSON.stringify({...extra,...body})}); dialog.close(); await load(); } catch(err){showError(err.message);} };
   dialog.showModal();
 }
+
+window.snmpPreview=async id=>{
+  try {
+    const sw=data.find(s=>s.id===id);
+    const snapshot=await api(`/api/switches/${id}/snmp`);
+    const counts=new Map();
+    for(const row of snapshot.macs)counts.set(row.if_index,(counts.get(row.if_index)||0)+1);
+    const portRows=snapshot.ports.map(p=>`<tr><td>${esc(p.port)}</td><td>${esc(p.name)}</td><td><span class="link-state ${esc(p.link_state)}">${p.link_state==="up"?"Aktív":"Inaktív"}</span></td><td>${esc(p.speed_mbps)} Mbit/s</td><td>${counts.get(p.if_index)||0}</td></tr>`).join("");
+    const macRows=snapshot.macs.map(d=>`<tr><td>${esc(d.port)}</td><td><strong>${esc(d.mac)}</strong></td><td>${esc(d.vlan)}</td></tr>`).join("");
+    const html=`<div class="field full snmp-summary"><strong>${esc(snapshot.system.description||sw.model||sw.name)}</strong><span>${snapshot.ports.length} port · ${snapshot.macs.length} MAC-cím</span><small>Az import a kézi elnevezéseket és kapcsolatokat nem írja felül.</small></div>
+      <div class="field full snmp-preview"><table><thead><tr><th>Port</th><th>Interfész</th><th>Kapcsolat</th><th>Sebesség</th><th>MAC</th></tr></thead><tbody>${portRows}</tbody></table></div>
+      <div class="field full"><details class="snmp-macs"><summary>${snapshot.macs.length} megtanult MAC-cím megtekintése</summary><div class="snmp-preview"><table><thead><tr><th>Port</th><th>MAC-cím</th><th>VLAN</th></tr></thead><tbody>${macRows||'<tr><td colspan="3">Nincs lekérdezett MAC-cím.</td></tr>'}</tbody></table></div></details></div>`;
+    openEditor(`SNMP előnézet – ${sw.name}`,html,`/api/switches/${id}/snmp/import`,"POST",{},{wide:true,submitLabel:"Importálás"});
+  }catch(err){showError(err.message)}
+};
 
 document.querySelector("#add-switch").onclick=()=>openEditor("Új switch",field("name","Név")+field("management_ip","Menedzsment IP")+field("model","Típus")+field("base_mac","Saját MAC")+field("location","Helyszín", "", "text", true)+notes(),"/api/switches","POST");
 window.editSwitch=id=>{const x=data.find(s=>s.id===id);openEditor("Switch szerkesztése",field("name","Név",x.name)+field("management_ip","Menedzsment IP",x.management_ip)+field("model","Típus",x.model)+field("base_mac","Saját MAC",x.base_mac)+field("location","Helyszín",x.location,"text",true)+notes(x.notes),`/api/switches/${id}`,"PUT")};

@@ -2,7 +2,7 @@
 
 Egyszerű belső webalkalmazás switchek, portok, VLAN-ok és MAC-címek nyilvántartására.
 
-A webes felület D-Link és 3Com MAC-táblák tömeges beillesztését, valamint Windows `arp -a` kimenet importját is támogatja. Az ARP-import a MAC-címekhez automatikusan hozzárendeli az ismert IP-címeket.
+A webes felület D-Link és 3Com MAC-táblák tömeges beillesztését, valamint Windows `arp -a` kimenet importját is támogatja. Az ARP-import a MAC-címekhez automatikusan hozzárendeli az ismert IP-címeket. A szerveroldali, csak olvasható SNMP-integráció portállapotot, sebességet és MAC-táblát tud előnézetben lekérni, majd külön jóváhagyással importálni.
 
 ## Követelmények
 
@@ -33,3 +33,5 @@ pm2 save
 ## Biztonság
 
 Az alkalmazás csak belső vagy VPN-címre figyeljen. Nyilvános eléréshez HTTPS-re beállított Nginx szükséges. Az `APP_USER` és `APP_PASSWORD` környezeti változókat kötelező beállítani. Switch-jelszót az alkalmazásban ne tárolj.
+
+Az SNMP-hez az `.env` fájlban add meg a `SNMP_COMMUNITY` értékét. Kizárólag egyedi, read-only community használható; az alapértelmezett `public`/`private` értékeket és SNMP write jogosultságot ne használj. Az SNMP-végpontok csak privát IPv4-címeket fogadnak el.
